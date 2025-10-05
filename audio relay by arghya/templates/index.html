@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Relay</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: monospace;
+            background: #000;
+            color: #0f0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .container {
+            text-align: center;
+        }
+        h1 {
+            font-size: 24px;
+            margin-bottom: 30px;
+        }
+        .status {
+            font-size: 18px;
+            margin: 20px 0;
+            padding: 10px;
+            border: 1px solid #0f0;
+        }
+        .info {
+            font-size: 14px;
+            margin-top: 20px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AUDIO RELAY</h1>
+        <div class="status" id="status">Connecting...</div>
+        <div class="info" id="info">Tap screen to start audio</div>
+        <div class="info" id="debug" style="color: yellow; margin-top: 10px;"></div>
+    </div>
+
+    <!-- Socket.IO client library -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    
+    <script>
+        // Connect to the Flask-SocketIO server
+        const socket = io();
+        
+        // Audio context for playing received audio
+        let audioContext;
+        let nextPlayTime = 0;
+        const sampleRate = 44100;
+        const channels = 2;  // Stereo audio (matches server CHANNELS setting)
+        let packetsReceived = 0;
+        
+        // Debug display
+        function updateDebug(msg) {
+            document.getElementById('debug').textContent = msg;
+            console.log('DEBUG:', msg);
+        }
+        
+        // Initialize audio context on user gesture (required by browsers)
+        function initAudio() {
+            if (!audioContext) {
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: sampleRate
+                    });
+                    nextPlayTime = audioContext.currentTime;
+                    document.getElementById('status').textContent = 'Connected - Playing Audio';
+                    document.getElementById('info').textContent = 'Audio is streaming...';
+                    updateDebug('Audio context created! State: ' + audioContext.state);
+                } catch (e) {
+                    updateDebug('ERROR creating audio context: ' + e.message);
+                }
+            }
+        }
+        
+        // When connected to server
+        socket.on('connect', function() {
+            console.log('Connected to server');
+            updateDebug('Socket connected!');
+            initAudio();
+        });
+        
+        // When disconnected from server
+        socket.on('disconnect', function() {
+            document.getElementById('status').textContent = 'Disconnected';
+            updateDebug('Socket disconnected');
+            console.log('Disconnected from server');
+        });
+        
+        // Receive audio data from server
+        socket.on('audio_data', function(audioData) {
+            packetsReceived++;
+            
+            if (!audioContext) {
+                initAudio();
+            }
+            
+            // Update debug every 50 packets
+            if (packetsReceived % 50 === 0) {
+                updateDebug('Received ' + packetsReceived + ' packets. Latency optimized!');
+            }
+            
+            try {
+                // Convert received binary data to audio buffer
+                const arrayBuffer = audioData;
+                const int16Array = new Int16Array(arrayBuffer);
+                
+                // Convert int16 to float32 for Web Audio API
+                const float32Array = new Float32Array(int16Array.length);
+                for (let i = 0; i < int16Array.length; i++) {
+                    float32Array[i] = int16Array[i] / 32768.0;  // Normalize to -1.0 to 1.0
+                }
+                
+                // Create audio buffer with proper channel count
+                const framesPerChannel = float32Array.length / channels;
+                const audioBuffer = audioContext.createBuffer(channels, framesPerChannel, sampleRate);
+                
+                // Deinterleave stereo data
+                if (channels === 2) {
+                    const leftChannel = audioBuffer.getChannelData(0);
+                    const rightChannel = audioBuffer.getChannelData(1);
+                    for (let i = 0; i < framesPerChannel; i++) {
+                        leftChannel[i] = float32Array[i * 2];
+                        rightChannel[i] = float32Array[i * 2 + 1];
+                    }
+                } else {
+                    // Mono
+                    audioBuffer.getChannelData(0).set(float32Array);
+                }
+                
+                // Create source and play
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                
+                // Improved scheduling for lower latency
+                const currentTime = audioContext.currentTime;
+                
+                // If we're behind, catch up quickly
+                if (nextPlayTime < currentTime) {
+                    nextPlayTime = currentTime + 0.02; // Small 20ms buffer
+                }
+                
+                // If we're too far ahead, reset (prevents excessive buffering)
+                if (nextPlayTime - currentTime > 0.3) { // Max 300ms buffer
+                    nextPlayTime = currentTime + 0.05;
+                    console.log('Reset buffer - was too far ahead');
+                }
+                
+                source.start(nextPlayTime);
+                nextPlayTime += audioBuffer.duration;
+            } catch (e) {
+                updateDebug('ERROR playing audio: ' + e.message);
+                console.error('Audio playback error:', e);
+            }
+        });
+        
+        // Auto-start audio on any user interaction (browser requirement)
+        document.addEventListener('click', function() {
+            initAudio();
+            updateDebug('Screen tapped! Audio initialized.');
+        });
+        document.addEventListener('touchstart', function() {
+            initAudio();
+            updateDebug('Screen touched! Audio initialized.');
+        });
+    </script>
+</body>
+</html>
